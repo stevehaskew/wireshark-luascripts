@@ -16,7 +16,66 @@ onq_proto.fields={F_op,F_rn,F_gn,F_raw}
 -- Main Dissector
 function onq_proto.dissector(buffer,pinfo,tree)
 	pinfo.cols.protocol = "ONQ-PMS"
-	local subtree = tree:add(onq_proto,buffer(),"OnQ Protocol")
+	subtree = tree:add(onq_proto,buffer(),"OnQ Protocol")
+	local nmtree = subtree:add(buffer(),"Number of messages")
+	local plen = buffer:len()
+	local i = 0 -- position counter - end of message
+	local o = 1 -- offset
+	
+	i = string.find(buffer(0,plen):string(),string.char(03)) - 1
+	
+	-- Iterate through packet, per message
+	local a = 0
+	local lastmsg = ''
+	local msg = string.gsub(buffer(offset,length):string(),string.char(2),"^")
+	msg = string.gsub(msg,string.char(3),"$")
+--	message("Whole message: " .. msg)
+--	message("First message: 1 to " .. i)
+	while i <= plen do
+		lastmsg = onqMessageDissect(buffer,pinfo,subtree,o,i-o) -- o = offset, i-o = length
+		if i == plen-1 then
+			break
+		end
+		o = string.find(buffer(i,plen-i):string(),"\x02") + i
+		local ne = string.find(buffer(i+1,plen-(i+1)):string(),"\x03")
+		if ne == nil then
+			-- Add message about malformity to tree
+			local mdata = buffer(o,plen-o):string()
+			subtree:add(buffer(o,plen-o), "Malformed message : " .. mdata)
+			break
+		else
+			i = ne + i			
+		end
+--		message("Found next message from " .. o .. " to " .. i .. ". (".. buffer(o,i-o):string() ..")")
+		a = a + 1
+	end
+
+	if a > 0 then
+		onq_op_info = a+1 .. " OnQ Messages"
+	else
+		onq_op_info = lastmsg
+	end
+	
+	nmtree:set_text("Number of messages: " .. a+1)
+	
+	-- Get all the data, except for the \002s on each end
+	local onq_rawdata = buffer(1,plen-2):string()
+	onq_rawdata=string.gsub(onq_rawdata,"\x03\x02"," - ")
+	onq_rawdata=string.gsub(onq_rawdata,"\x03","")
+	subtree:add(F_raw,buffer(1,plen-2),onq_rawdata)
+	-- Add the string to the info column
+	pinfo.cols.info:set(onq_op_info .. " - " .. onq_rawdata)
+--	onqMessageDissect(buffer,pinfo,subtree,0)
+end
+
+function onqMessageDissect (buffer,pinfo,tree,offset,length)
+	-- Let's see if this works...
+	local subtree = tree:add(onq_proto,buffer(offset,length),"OnQ Message")
+
+	local msg = string.gsub(buffer(offset,length):string(),string.char(2),"^")
+	msg = string.gsub(msg,string.char(3),"$")
+	
+--	message("Now working with " .. msg ..". Offset is " .. offset .. " and length is " .. length)
 
 	-- Horrendous data structures
 	local oqfad = {} -- All Data (Type and Data)
@@ -28,20 +87,27 @@ function onq_proto.dissector(buffer,pinfo,tree)
 
 	local plen = buffer:len()
 	-- i will be position counter
-	local i = 0
+	local i = offset
 	-- Find first pipe
-	i = string.find(buffer(0,plen):string(),"|") - 1
-	while i <= plen do
+	i = string.find(buffer(offset,length):string(),"|")
+--	message("First pipe at " .. i)
+	while i <= (length-1) do
 		-- Get everything from in front of this pipe to the end
-		local restof = buffer(i+1,plen-(i+1)):string()
+--		message("Getting restof with " .. offset+i .. "," .. length-(i))
+--		message("length-(offset+i)")
+--		message("length " .. length .. ", offset " .. offset .. ", i " .. i)
+		local restof = buffer(offset+i,length-(i)):string()
+--		message("Rest of string is " .. restof)
 		-- Get position of the next pipe
 		local npipe = string.find(restof,"|")
+--		message("Next pipe at " .. npipe)
 		-- Break if we're done
 		if npipe == nil then
 			break
 		end
 		-- Get the value of the bit between the pipes
 		local bval = buffer(i+1,npipe-1):string()
+--		message("Got value " .. bval)
 		-- Store appropriate values
 		oqfad[oqfc] = bval
 		oqfd[oqfc] = buffer(i+3,npipe-3):string()
@@ -52,14 +118,19 @@ function onq_proto.dissector(buffer,pinfo,tree)
 		oqfc = oqfc + 1
 		-- Move position counter to next pipe
 		i = i + npipe
+--		message("i value for next field is " .. i)
 	end
 
+--	message("Broken out of loop: " .. i .. " and " .. length)
+	
+--	message("Looking at the whole string for the opcode. offset " .. offset)
 	-- Get the operation code
-	local onq_op = buffer(1,2):string()
+	local onq_op = buffer(offset,2):string()
+--	message("Found " .. onq_op .. " as opcode")
 	-- Convert it to something human readable
 	local onq_op_txt = onqMessageType(onq_op)
 	-- Add it to the tree
-	subtree = subtree:add(F_op,buffer(1,2), onq_op,onq_op_txt)
+	subtree = subtree:add(F_op,buffer(offset,2), onq_op,onq_op_txt)
 	-- Iterate through all the fields and add them to the tree
 	for ic=1,oqfc-1 do
 		-- these null checks should never really happen
@@ -87,13 +158,7 @@ function onq_proto.dissector(buffer,pinfo,tree)
 	end
 	
 	-- Set Info column
-	onq_op_info = "OnQ " .. onq_op_txt
-
-	-- Get all the data, except for the \002s on each end
-	local onq_rawdata = buffer(1,plen-2):string()
-	subtree:add(F_raw,buffer(1,plen-2),onq_rawdata)
-	-- Add the string to the info column
-	pinfo.cols.info:set(onq_op_info .. " - " .. onq_rawdata)
+	return ("OnQ " .. onq_op_txt)
 end
 
 -- Message Type Decoding
